@@ -1,6 +1,6 @@
 {
   "name": "terminal-desk",
-  "version": "0.2.0",
+  "version": "0.0.1",
   "description": "A side panel for Claude Code: things Claude left undone, where your context went, cost, and whether the prompt cache is still warm.",
   "author": {
     "name": "terminal-desk"
