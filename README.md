@@ -171,3 +171,7 @@ python3 scripts/make-media.py assets   # regenerate the placeholder screenshot, 
 
 - Costs are Claude Code's own estimates at list price, the same figure `/cost` shows, and can differ from your bill.
 - A mod runs with your permissions inside Claude Code. Everything this one does is in [`hooks/`](hooks). `claude plugin validate .` lists every event it hooks and every API it calls. It reads your transcript's tail to learn the cache lifetime, and it never sends anything over the network.
+
+## License
+
+[MIT](LICENSE): free to use, modify and share, including in commercial projects, as long as the copyright notice stays with the code.

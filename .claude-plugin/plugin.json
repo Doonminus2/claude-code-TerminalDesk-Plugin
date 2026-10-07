@@ -5,6 +5,8 @@
   "author": {
     "name": "terminal-desk"
   },
+  "license": "MIT",
+  "repository": "https://github.com/Doonminus2/claude-code-TerminalDesk-Plugin",
   "types": "./types/index.d.ts",
   "userConfig": {
     "autoOpen": {

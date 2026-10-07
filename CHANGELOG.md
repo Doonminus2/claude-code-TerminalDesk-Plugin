@@ -19,3 +19,4 @@ First public release.
 - **Status line** under the prompt: context %, cost, cache countdown and left-undone count.
 - Settings: `autoOpen`, `cacheTtl`, `warnPercent`, `urgentPercent`.
 - `install.sh` for installing from a clone, and a marketplace entry for one-line install from GitHub.
+- MIT license.
