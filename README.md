@@ -1,111 +1,173 @@
 # terminal-desk
 
-Mod สำหรับ Claude Code ที่เพิ่มแผงด้านข้าง มี 3 ส่วน + คำเตือน context:
+**A side panel for Claude Code that shows what Claude left unfinished, where your context went, and whether your prompt cache is still warm, and tells you when it's time to `/clear`.**
 
-- **Left undone** — งานที่ Claude ทิ้งค้างไว้ (ดูวิธีทำงานด้านล่าง)
-- **Where your context went** — แถบสีแยกตามหมวด (Messages, System tools, MCP, Memory files ฯลฯ) พร้อม % และจำนวน token
-- **Prompt cache** — cache ยังอุ่นอยู่ไหม เหลือเวลาอีกเท่าไรก่อนเย็น และ hit ratio ของ session
-- **คำเตือน context ใกล้เต็ม** — บอกให้ `/clear` หรือ `/compact` เมื่อถึงเวลา
+![terminal-desk demo: the desk pane beside a Claude Code session](assets/demo.gif)
 
-ด้านล่างแผงมีค่าใช้จ่ายและเวลาของ session ส่วนใต้ช่องพิมพ์มีแถบสถานะสั้นๆ แสดงตลอด เช่น
-`desk · 🟡 ctx 64% · $24.32 · cache warm 3:12 · ⚠ 3 left undone (/desk)`
+> The screenshot and demo here are placeholder mock-ups drawn with `scripts/make-media.py`, not captures of a real session. They will be replaced with real recordings. Full-size video: [assets/demo.mp4](assets/demo.mp4)
 
-## Left undone ทำงานยังไง
+## What is this?
 
-หลัง Claude ตอบเสร็จแต่ละรอบ mod จะเก็บรายการจาก 3 แหล่ง:
+Long Claude Code sessions hide three things you usually only notice when it's too late:
 
-1. **Claude said** — อ่านข้อความทั้งหมดที่ Claude เขียนในรอบนั้น แล้วจับ
-   - ประโยคที่ยอมรับว่าไม่ได้ทำ เช่น "I didn't run the tests", "not yet implemented", "I won't implement until you say so", "ยังไม่ได้รัน…", "ข้ามไป…"
-   - รายการ bullet ใต้หัวข้อ `OPEN`, `FLAGGED`, `BLOCKED`, `Remaining:`, `Next steps`, `Known issues` ฯลฯ (ขึ้นเป็น `OPEN: …`)
-   - ข้ามโค้ดใน ```` ``` ```` ไม่จับ
-2. **in a file** — ตอน Claude ใช้ Write / Edit / MultiEdit / NotebookEdit ถ้ามีบรรทัด**ใหม่**ที่มี `TODO`, `FIXME`, `XXX`, `HACK`, `NotImplementedError` จะถูกจับพร้อมชื่อไฟล์ (บรรทัด TODO ที่มีอยู่ก่อนแล้วไม่นับ)
-3. **task list** — to-do ของ Claude เอง (TaskCreate / TaskUpdate / TodoWrite) ที่ยังไม่ completed แสดงเป็น ◐ กำลังทำ / ◻ ยังไม่เริ่ม และหายไปเองเมื่อ Claude ทำเสร็จ
+1. **Work that quietly didn't happen.** Claude writes *"I didn't run the tests"* halfway down a long answer, leaves a `// TODO` in a file, or ends a turn with tasks still open on its own to-do list. You read the summary, move on, and the gap ships.
+2. **A context window that keeps filling.** As the conversation grows, every message re-sends more tokens, answers slow down, cost goes up and Claude gets less sharp. Nothing tells you when to start fresh.
+3. **A prompt cache you can't see.** The same message can cost a few cents or a few dollars depending on whether the cache is still warm (see [Warm vs. cold prompt cache](#warm-vs-cold-prompt-cache)).
 
-ในแผงกด:
-- `✓` ลบทีละรายการ
-- `x` ล้างทั้งหมด (หรือ `/desk-clear`)
-- `f` (Ask Claude to finish) พิมพ์คำขอให้ Claude ทำรายการที่ค้างลงในช่องพิมพ์ คุณกด Enter เอง
-- `h` เปิดคำอธิบายนี้ในแผง
+terminal-desk is a **Claude Code mod**: a plugin that runs inside Claude Code and draws its own pane next to the transcript. It keeps all three in view while you work.
 
-รายการค้างจะ**ถูกยกไป session ใหม่หลัง `/clear`** (task ที่ยังไม่เสร็จก็ยกไปด้วย) จึง clear ก่อนแล้วค่อยสั่งให้ Claude ทำต่อใน context ที่สะอาดได้
+![terminal-desk screenshot: Left undone, context breakdown, prompt cache and a red "context nearly full" warning](assets/screenshot.png)
 
-การจับใช้รูปแบบข้อความ อาจพลาดหรือจับเกินบ้าง แก้ pattern ได้ใน `hooks/detect.ts`
+## Features
 
-## คำเตือน context ใกล้เต็ม
+### Left undone
 
-| context | ที่แสดง |
+After every turn, the desk collects unfinished work from three sources:
+
+| Source | What it catches | Label in the pane |
+| --- | --- | --- |
+| **What Claude said** | Admissions in any text Claude wrote that turn: *"I didn't run…"*, *"not yet implemented"*, *"skipped"*, *"I won't implement until you say so"*, Thai phrases such as *"ยังไม่ได้รัน"*, and the bullets under headings like `OPEN`, `FLAGGED`, `BLOCKED`, `Remaining:`, `Next steps`. Code blocks are ignored. | `Claude said` |
+| **Files Claude edited** | Lines that are **new** in a `Write` / `Edit` / `MultiEdit` / `NotebookEdit` and contain `TODO`, `FIXME`, `XXX`, `HACK` or `NotImplementedError`. Markers that were already in the file don't count. | `in a file` |
+| **Claude's task list** | Items from `TaskCreate` / `TaskUpdate` / `TodoWrite` that aren't completed: ◐ in progress, ◻ pending. They disappear once Claude completes them. | `Task list` |
+
+Keys while the pane has focus:
+
+| Key | Action |
 | --- | --- |
-| ต่ำกว่า 60% | ปกติ |
-| 60% ขึ้นไป | 🟡 toast หนึ่งครั้ง, แถบเหนือช่องพิมพ์, ป้ายในแผง: "จบงานนี้แล้ว /clear" |
-| 80% ขึ้นไป | 🔴 เตือนอีกครั้ง: "ถึงเวลา /clear (หรือ /compact เพื่อเก็บสรุป)" |
+| `✓` | Dismiss one item |
+| `x` | Clear the whole list (or run `/desk-clear`) |
+| `f` | **Ask Claude to finish**: types a request listing every open item into your prompt. Nothing is sent until you press Enter. |
+| `h` | Show how the list is filled, inside the pane |
 
-แถบเหนือช่องพิมพ์มีปุ่ม **Type /clear**, **Type /compact** (พิมพ์คำสั่งลงช่องให้ คุณกด Enter เอง) และ **Hide** ซ่อนจนกว่าจะถึงระดับถัดไป ปรับเกณฑ์ได้ที่ `/plugin` → terminal-desk → configure (`warnPercent`, `urgentPercent`)
+The list **survives `/clear`**, open tasks included. Clear the context first, then press `f` and Claude finishes the leftovers with a clean context.
 
-## ติดตั้ง
+Detection is pattern-based, so it will sometimes miss an item or catch one too many. Dismiss false hits with `✓`, and tune the patterns in [`hooks/detect.ts`](hooks/detect.ts).
 
-ต้องมี Claude Code CLI เวอร์ชัน 2.1.287 ขึ้นไป (`claude --version`)
+### Where your context went
 
-**แบบที่ 1: ติดตั้งจาก GitHub (แนะนำ)** พิมพ์ในช่องพิมพ์ของ Claude Code ใน terminal:
+A colored bar and a breakdown by category, the same categories `/context` uses (Messages, System tools, Skills, Memory files, MCP server instructions, System prompt, Custom agents, Free space, Autocompact buffer), with the percentage and token count of the window in use.
+
+### Context warning: time to `/clear`
+
+| Context used | What you see |
+| --- | --- |
+| below 60% | Nothing extra |
+| **60% or more** | 🟡 A one-time toast and a yellow band above the prompt: finish the current task, then `/clear` (or `/compact` to keep a summary) |
+| **80% or more** | 🔴 A second toast, a red banner in the pane, and the band turns red: time to `/clear` |
+
+The band above the prompt shows even when the pane is closed. Its buttons are:
+- **Type /clear** and **Type /compact**: put the command in your prompt. Nothing runs until you press Enter.
+- **Hide**: hides the band until the next level.
+
+Both thresholds can be changed (see [Settings](#settings)).
+
+`/clear` starts a new conversation with an empty context. `/compact` replaces the conversation with a summary, keeping the gist at a fraction of the tokens.
+
+### Prompt cache
+
+Shows whether the cache is **warm** (with a countdown to when it goes cold) or **cold** (and how long ago it expired). Also shows how many tokens the next message will read from the cache or have to re-cache, and the session's cache hit ratio. The cache lifetime (5 minutes or 1 hour) is read from the session transcript, or you can set it yourself.
+
+### Always-on status line
+
+Under the prompt, even with the pane closed:
+
+```
+desk · ctx 64% · $2.55 · cache warm 3:12 · ⚠ 4 left undone (/desk)
+```
+
+The pane's footer shows the session cost (Claude Code's own estimate, as in `/cost`) and how long the session has been running.
+
+## Warm vs. cold prompt cache
+
+Every message you send to Claude carries the **whole conversation so far**: the system prompt, tool definitions, CLAUDE.md, and every earlier message and tool result. On a long session that can be hundreds of thousands of tokens per message.
+
+**Prompt caching** lets the API skip re-reading that unchanged beginning. After a request, the prefix of the prompt is kept in a cache for a limited time (its *TTL*: 5 minutes by default, or 1 hour). Each time a request reads the cache, the timer starts over.
+
+- **Warm cache (hot prompt)**: you send the next message while the cache is still alive. Claude reads the conversation from cache at about **a tenth of the normal input price** (less on some models), and the reply starts faster.
+- **Cold cache (cold prompt)**: the cache expired, for example because you stepped away for more than 5 minutes. The next message has to **write the entire context to the cache again**, at **1.25×** the normal input price (2× for the 1-hour cache), and it takes longer to start.
+
+The bigger the context, the bigger the gap. At 150K tokens of context, a cold message costs roughly **12 times** what the same message costs warm. That's why the desk shows a countdown, and why `/clear` before a long break is often cheaper than coming back to a huge, cold conversation.
+
+Source: [Anthropic prompt caching docs](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
+
+## Install
+
+Requires **Claude Code 2.1.287 or newer** (mods are a newer plugin feature). Check with `claude --version`.
+
+**Option 1: from GitHub (recommended).** At the prompt of a Claude Code session in your terminal:
 
 ```
 /plugin install terminal-desk --marketplace Doonminus2/claude-code-TerminalDesk-Plugin
 ```
 
-ตอบ `y` เพื่อเพิ่ม marketplace แล้วเลือก scope เป็น user
+Answer `y` to add the marketplace and pick the **user** scope.
 
-**แบบที่ 2: จาก clone ในเครื่อง** (macOS / Linux)
+**Option 2: from a clone** (macOS / Linux):
 
 ```bash
 git clone https://github.com/Doonminus2/claude-code-TerminalDesk-Plugin.git
 bash claude-code-TerminalDesk-Plugin/install.sh
 ```
 
-จากนั้นเปิด Claude Code ใหม่ (หรือพิมพ์ `/reload-plugins` ถ้าเปิดค้างไว้)
+Then restart Claude Code, or run `/reload-plugins` in an open session.
 
-## ใช้งาน
+## Usage
 
-| คำสั่ง | ทำอะไร |
+| Command | What it does |
 | --- | --- |
-| `/desk` | เปิด/ปิดแผง |
-| `/desk-clear` | ล้างรายการ Left undone |
+| `/desk` | Show or hide the pane |
+| `/desk-clear` | Empty the Left undone list |
 
-- แผงจะเปิดเองตอนเริ่ม session ถ้าหน้าต่าง terminal กว้างพอ (ราว 144 คอลัมน์ขึ้นไป) ถ้าแคบกว่านั้นพิมพ์ `/desk` เปิดเองได้ จะไปอยู่เหนือช่องพิมพ์แทน
-- แผงจะเป็น sidebar ด้านขวาเมื่อใช้ fullscreen mode ของ Claude Code
-- ปรับตั้งค่าได้ที่ `/plugin` → terminal-desk → configure:
-  - `autoOpen` เปิดแผงเองตอนเริ่ม session
-  - `cacheTtl` อายุ cache `auto` / `5m` / `1h`
-  - `warnPercent`, `urgentPercent` เกณฑ์เตือน context (ค่าเริ่มต้น 60 / 80)
+- The pane opens by itself when a session starts if the terminal is wide enough (about 144 columns). Otherwise run `/desk` and it opens above the prompt.
+- In Claude Code's fullscreen layout the pane docks as a sidebar on the right, as in the screenshot.
+- Works in the terminal and in the Code tab of the Claude desktop app.
 
-## อัปเดต
+## Settings
+
+`/plugin` → **terminal-desk** → configure:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `autoOpen` | `true` | Open the pane when a session starts |
+| `cacheTtl` | `auto` | Cache lifetime: `auto` (read from the transcript), `5m` or `1h` |
+| `warnPercent` | `60` | Context % for the yellow warning |
+| `urgentPercent` | `80` | Context % for the red warning |
+
+## Update
 
 ```bash
 claude plugin marketplace update terminal-desk
 claude plugin update terminal-desk@terminal-desk
 ```
 
-แล้ว `/reload-plugins` ใน Claude Code
+Then `/reload-plugins` in Claude Code. If you installed with `install.sh`, `git pull` and run it again.
 
-## ถอนการติดตั้ง
+## Uninstall
 
 ```bash
 claude plugin uninstall terminal-desk@terminal-desk
 ```
 
-(ถ้าติดตั้งด้วย install.sh ใช้ `bash ~/.claude/mods/terminal-desk/install.sh --remove`)
+If you installed with `install.sh`, use `bash ~/.claude/mods/terminal-desk/install.sh --remove`.
 
-## พัฒนาต่อ
+## Develop
 
 ```bash
-claude --plugin-dir .            # โหลด mod จากโฟลเดอร์นี้ แก้แล้ว reload เอง
-claude plugin validate .         # ตรวจ manifest และ hooks
-claude plugin test .             # รันเทสต์ใน tests/
+claude --plugin-dir .        # run Claude Code with the mod loaded from this folder; saving a file reloads it
+claude plugin validate .     # check the manifest and hooks module
+claude plugin test .         # run the tests in tests/
+python3 scripts/make-media.py assets   # regenerate the placeholder screenshot, video and GIF
 ```
 
-- `hooks/register.tsx` แผง, status line, คำสั่ง `/desk`
-- `hooks/detect.ts` ตัวจับข้อความ "Left undone" (แก้ pattern ที่นี่)
-- `types/index.d.ts` state ของ mod
+| Path | What's there |
+| --- | --- |
+| [`hooks/register.tsx`](hooks/register.tsx) | The pane, the warning band, the status line, `/desk` and every event hook |
+| [`hooks/detect.ts`](hooks/detect.ts) | The "Left undone" patterns and small formatting helpers |
+| [`types/index.d.ts`](types/index.d.ts) | The mod's session state |
+| [`tests/desk.test.ts`](tests/desk.test.ts) | Detection, pane, warning and task-list tests on the terminal and desktop surfaces |
+| [`.claude-plugin/`](.claude-plugin) | Plugin manifest, settings and the marketplace entry |
 
-## หมายเหตุ
+## Notes
 
-- ค่าใช้จ่ายเป็นค่าประมาณที่ Claude Code คำนวณเอง (เหมือน `/cost`)
-- Mod รันด้วยสิทธิ์ของคุณ โค้ดทั้งหมดอยู่ใน `hooks/` อ่านได้ และตรวจได้ด้วย `claude plugin validate ~/.claude/mods/terminal-desk`
+- Costs are Claude Code's own estimates at list price, the same figure `/cost` shows, and can differ from your bill.
+- A mod runs with your permissions inside Claude Code. Everything this one does is in [`hooks/`](hooks). `claude plugin validate .` lists every event it hooks and every API it calls. It reads your transcript's tail to learn the cache lifetime, and it never sends anything over the network.
