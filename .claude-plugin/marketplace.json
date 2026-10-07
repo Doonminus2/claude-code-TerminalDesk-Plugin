@@ -1,0 +1,13 @@
+{
+  "name": "terminal-desk",
+  "description": "terminal-desk: a side panel mod for Claude Code",
+  "owner": {
+    "name": "terminal-desk"
+  },
+  "plugins": [
+    {
+      "name": "terminal-desk",
+      "source": "./"
+    }
+  ]
+}
