@@ -9,13 +9,23 @@ Mod สำหรับ Claude Code ที่เพิ่มแผงด้าน
 ด้านล่างแผงมีค่าใช้จ่ายและเวลาของ session ส่วนใต้ช่องพิมพ์มีแถบสถานะสั้นๆ แสดงตลอด เช่น
 `desk · ctx 32% · $24.32 · cache warm 3:12 · ⚠ 3 left undone (/desk)`
 
-## ติดตั้ง (macOS)
+## ติดตั้ง
 
 ต้องมี Claude Code CLI เวอร์ชัน 2.1.287 ขึ้นไป (`claude --version`)
 
+**แบบที่ 1: ติดตั้งจาก GitHub (แนะนำ)** พิมพ์ในช่องพิมพ์ของ Claude Code ใน terminal:
+
+```
+/plugin install terminal-desk --marketplace Doonminus2/claude-code-TerminalDesk-Plugin
+```
+
+ตอบ `y` เพื่อเพิ่ม marketplace แล้วเลือก scope เป็น user
+
+**แบบที่ 2: จาก clone ในเครื่อง** (macOS / Linux)
+
 ```bash
-unzip terminal-desk.zip -d ~/Downloads/terminal-desk
-bash ~/Downloads/terminal-desk/install.sh
+git clone https://github.com/Doonminus2/claude-code-TerminalDesk-Plugin.git
+bash claude-code-TerminalDesk-Plugin/install.sh
 ```
 
 จากนั้นเปิด Claude Code ใหม่ (หรือพิมพ์ `/reload-plugins` ถ้าเปิดค้างไว้)
@@ -34,8 +44,22 @@ bash ~/Downloads/terminal-desk/install.sh
 ## ถอนการติดตั้ง
 
 ```bash
-bash ~/.claude/mods/terminal-desk/install.sh --remove
+claude plugin uninstall terminal-desk@terminal-desk
 ```
+
+(ถ้าติดตั้งด้วย install.sh ใช้ `bash ~/.claude/mods/terminal-desk/install.sh --remove`)
+
+## พัฒนาต่อ
+
+```bash
+claude --plugin-dir .            # โหลด mod จากโฟลเดอร์นี้ แก้แล้ว reload เอง
+claude plugin validate .         # ตรวจ manifest และ hooks
+claude plugin test .             # รันเทสต์ใน tests/
+```
+
+- `hooks/register.tsx` แผง, status line, คำสั่ง `/desk`
+- `hooks/detect.ts` ตัวจับข้อความ "Left undone" (แก้ pattern ที่นี่)
+- `types/index.d.ts` state ของ mod
 
 ## หมายเหตุ
 
