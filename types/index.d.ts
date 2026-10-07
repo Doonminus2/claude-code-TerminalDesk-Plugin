@@ -1,4 +1,4 @@
-export type UndoneKind = 'said' | 'file'
+export type UndoneKind = 'said' | 'file' | 'task'
 
 export type TaskItem = {
   id: string
@@ -46,6 +46,8 @@ declare module 'claude-code' {
     'terminal-desk': {
       undone: UndoneItem[]
       tasks: TaskItem[]
+      warnLevel: number
+      isBandHidden: boolean
       nextId: number
       usage: UsageSnapshot
       cache: CacheState

@@ -14,6 +14,12 @@ function world(on: On) {
   on('ui.status', async () => ({ value: undefined }) as never)
   on('ui.toast', async () => ({ value: undefined }) as never)
   on('turn.complete', async ($, e) => ({ text: e.answer }))
+  on('session.measure', async ($, e) => ({ changed: e.changed }))
+  // Claude Code's own band: empty
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return Box({ key: 'engine-band', children: [] })
+  })
   on('session.usage', async () =>
     ({ value: {
       startedAt: 0,
@@ -150,5 +156,57 @@ describe('desk', () => {
     expect(await ui.find({ text: /in a file/ })).toBeDefined()
     expect(await ui.find({ text: /TODO: wait with the next attempt/ })).toBeDefined()
     await ui.unmount()
+  })
+
+  test('warns to /clear as the context fills, above the prompt and in the pane', { options: { autoOpen: false } }, async ($, on) => {
+    world(on)
+    await $.session.start({ cwd: '/tmp/project' } as never)
+    const BAND = {
+      component: 'AbovePrompt' as const,
+      props: { hasSurvey: false, isWorking: false, maxRows: 6, bodyColumns: 80, scroll: { offset: 0, bodyRows: 6 }, view: {} },
+    }
+
+    await $.session.measure({ context: { tokens: 50_000, window: 200_000, percent: 25 }, rateLimits: [], changed: ['context'] })
+    let band = await $.ui.mount({ plugin: 'terminal-desk', surface: 'terminal', ...BAND } as never)
+    expect(await band.find({ text: /Context \d+% full/ })).toBeUndefined()
+    await band.unmount()
+
+    await $.session.measure({ context: { tokens: 170_000, window: 200_000, percent: 85 }, rateLimits: [], changed: ['context'] })
+    for (const surface of ['terminal', 'desktop'] as const) {
+      band = await $.ui.mount({ plugin: 'terminal-desk', surface, ...BAND } as never)
+      expect(await band.find({ text: /Context 85% full/ })).toBeDefined()
+      expect(await band.find({ key: 'fill-clear' })).toBeDefined()
+      await band.unmount()
+
+      const pane = await $.ui.mount({ plugin: 'terminal-desk', surface, ...PANE })
+      expect(await pane.find({ text: /Context nearly full/ })).toBeDefined()
+      await pane.unmount()
+    }
+
+    band = await $.ui.mount({ plugin: 'terminal-desk', surface: 'terminal', ...BAND } as never)
+    await band.press({ key: 'hide-warn' })
+    expect(await band.find({ text: /Context 85% full/ })).toBeUndefined()
+    await band.unmount()
+  })
+
+  test("Claude's open tasks show in Left undone until completed", { options: { autoOpen: false } }, async ($, on) => {
+    world(on)
+    on('tool.call', { tool: 'TaskCreate' }, async () =>
+      ({ result: { task: { id: '7', subject: 'Write the parser tests' } }, text: 'ok' }) as never)
+    on('tool.call', { tool: 'TaskUpdate' }, async () => ({ result: {}, text: 'ok' }) as never)
+    await $.session.start({ cwd: '/tmp/project' } as never)
+
+    await $.tool.call({ tool: 'TaskCreate', subject: 'Write the parser tests', description: 'cover headings' } as never)
+    let pane = await $.ui.mount({ plugin: 'terminal-desk', surface: 'terminal', ...PANE })
+    expect(await pane.find({ text: /Write the parser tests/ })).toBeDefined()
+    expect(await pane.find({ text: /Left undone \(1\)/ })).toBeDefined()
+    await pane.unmount()
+
+    await $.tool.call({ tool: 'TaskUpdate', taskId: '7', status: 'completed' } as never)
+    pane = await $.ui.mount({ plugin: 'terminal-desk', surface: 'terminal', ...PANE })
+    expect(await pane.find({ text: /Write the parser tests/ })).toBeUndefined()
+    await pane.press({ key: 'help' })
+    expect(await pane.find({ text: /three sources/ })).toBeDefined()
+    await pane.unmount()
   })
 })

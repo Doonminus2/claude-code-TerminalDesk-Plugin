@@ -4,6 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { CacheTtl, CategoryRow, TaskItem, UndoneItem } from '../types'
 import {
   clock,
+  contextLevel,
   duration,
   findMarkers,
   findSaid,
@@ -18,6 +19,8 @@ const MAX_ITEMS = 50
 
 const undone = atom({ plugin: 'terminal-desk', key: 'undone' } as const, [])
 const tasks = atom({ plugin: 'terminal-desk', key: 'tasks' } as const, [])
+const warnLevel = atom({ plugin: 'terminal-desk', key: 'warnLevel' } as const, 0)
+const isBandHidden = atom({ plugin: 'terminal-desk', key: 'isBandHidden' } as const, false)
 const nextId = atom({ plugin: 'terminal-desk', key: 'nextId' } as const, 1)
 const usage = atom({ plugin: 'terminal-desk', key: 'usage' } as const, {
   window: 200_000,
@@ -32,13 +35,14 @@ const cache = atom({ plugin: 'terminal-desk', key: 'cache' } as const, {
   lastContext: 0,
 })
 
-type Options = { autoOpen?: boolean; cacheTtl?: string }
+type Options = { autoOpen?: boolean; cacheTtl?: string; warnPercent?: number; urgentPercent?: number }
+type Limits = { warnAt: number; urgentAt: number }
 type Api = EngineInterface
 
 // ---------- helpers that touch $ ----------
 
 
-async function addItems($: Api, items: { kind: 'said' | 'file'; text: string; file?: string }[]) {
+async function addItems($: Api, items: { kind: 'said' | 'file' | 'task'; text: string; file?: string }[]) {
   if (items.length === 0) return 0
   const now = await $.clock.now()
   let added = 0
@@ -60,6 +64,63 @@ async function addItems($: Api, items: { kind: 'said' | 'file'; text: string; fi
   })
   if (added > 0) await update($, nextId, id => id + added)
   return added
+}
+
+/** Follow Claude's own task list (TaskCreate / TaskUpdate / TodoWrite). */
+async function trackTasks($: Api, tool: string, input: Record<string, unknown>, result: unknown) {
+  if (tool === 'TodoWrite' && Array.isArray(input.todos)) {
+    const todos = input.todos as { content?: unknown; status?: unknown }[]
+    await update($, tasks, () =>
+      todos.map((t, i) => ({
+        id: `todo-${i + 1}`,
+        subject: String(t.content ?? ''),
+        status: t.status === 'completed' || t.status === 'in_progress' ? t.status : 'pending',
+      })),
+    )
+    return
+  }
+  if (tool === 'TaskCreate') {
+    const made = (result as { task?: { id?: unknown; subject?: unknown } } | undefined)?.task
+    const id = made?.id !== undefined ? String(made.id) : `t${Date.now()}`
+    const subject = String(made?.subject ?? input.subject ?? '')
+    await update($, tasks, list => [...list.filter(t => t.id !== id), { id, subject, status: 'pending' as const }])
+    return
+  }
+  if (tool === 'TaskUpdate') {
+    const id = String(input.taskId ?? '')
+    const status = input.status
+    await update($, tasks, list => {
+      if (status === 'deleted') return list.filter(t => t.id !== id)
+      const known = list.find(t => t.id === id)
+      const next: TaskItem = {
+        id,
+        subject: typeof input.subject === 'string' ? input.subject : (known?.subject ?? `task #${id}`),
+        status:
+          status === 'completed' || status === 'in_progress' || status === 'pending'
+            ? status
+            : (known?.status ?? 'pending'),
+      }
+      return known ? list.map(t => (t.id === id ? next : t)) : [...list, next]
+    })
+  }
+}
+
+/** Raise the context warning once per level as the context fills; reset when it empties. */
+async function checkContext($: Api, limits: Limits) {
+  const u = await read($, usage)
+  const level = contextLevel(u.percent, limits.warnAt, limits.urgentAt)
+  const prev = await read($, warnLevel)
+  if (level === prev) return
+  await update($, warnLevel, () => level)
+  if (level > prev) {
+    await update($, isBandHidden, () => false)
+    $.ui.toast(
+      level === 2
+        ? `🔴 Context ${u.percent}% full: time to /clear (or /compact to keep a summary)`
+        : `🟡 Context ${u.percent}% full: consider /clear when this task is done`,
+      { timeoutMs: 8000 },
+    )
+  }
 }
 
 /** Everything the assistant wrote since the person's last prompt, newest last. */
@@ -93,12 +154,15 @@ async function refreshUsage($: Api, withBreakdown: boolean) {
   }))
 }
 
-async function statusLine($: Api, forcedTtl: CacheTtl | null) {
+async function statusLine($: Api, forcedTtl: CacheTtl | null, limits: Limits) {
   const [u, c, list, ts] = await Promise.all([read($, usage), read($, cache), read($, undone), read($, tasks)])
   const now = await $.clock.now()
   const parts: string[] = []
   const open = list.length + ts.filter(t => t.status !== 'completed').length
-  if (u.percent !== undefined) parts.push(`ctx ${u.percent}%`)
+  const level = contextLevel(u.percent, limits.warnAt, limits.urgentAt)
+  if (u.percent !== undefined) {
+    parts.push(level === 2 ? `🔴 ctx ${u.percent}% → /clear` : level === 1 ? `🟡 ctx ${u.percent}%` : `ctx ${u.percent}%`)
+  }
   if (u.usd !== undefined) parts.push(`$${u.usd.toFixed(2)}`)
   const ttl = forcedTtl ?? c.ttl ?? '5m'
   if (c.isObserved && c.lastAt !== null) {
@@ -110,10 +174,17 @@ async function statusLine($: Api, forcedTtl: CacheTtl | null) {
 }
 
 
+function clampPercent(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(n) && n > 0 && n <= 100 ? n : fallback
+}
+
 export const register: Register = (on, options) => {
   const opts = (options ?? {}) as Options
   const forcedTtl: CacheTtl | null =
     opts.cacheTtl === '5m' || opts.cacheTtl === '1h' ? opts.cacheTtl : null
+  const warnAt = clampPercent(opts.warnPercent, 60)
+  const limits: Limits = { warnAt, urgentAt: Math.max(warnAt, clampPercent(opts.urgentPercent, 80)) }
 
   // ---------- session ----------
 
@@ -138,7 +209,7 @@ export const register: Register = (on, options) => {
     // One tick a second keeps the cache countdown and the status line current.
     $.clock.every(1000, () => {
       void (async () => {
-        await statusLine($, forcedTtl)
+        await statusLine($, forcedTtl, limits)
         const c = await read($, cache)
         if (c.isObserved) $.ui.invalidate('ui.render')
       })()
@@ -162,9 +233,37 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'desk-clear' }, async $ => {
     await update($, undone, () => [])
     await update($, tasks, () => [])
-    await statusLine($, forcedTtl)
+    await statusLine($, forcedTtl, limits)
     return { text: 'Cleared the "Left undone" list.' }
   })
+
+  // /clear resets the session's state: keep what is left undone for the fresh session.
+  on('session.end', { reason: 'clear' }, async ($, e, next) => {
+    const [list, ts, id] = await Promise.all([read($, undone), read($, tasks), read($, nextId)])
+    const open = ts.filter(t => t.status !== 'completed')
+    if (list.length + open.length > 0) {
+      const now = await $.clock.now()
+      let n = id
+      const carried: UndoneItem[] = [
+        ...list,
+        ...open.map(t => ({ id: n++, kind: 'task' as const, text: t.subject, at: now })),
+      ]
+      await $.store.set('carry', { at: now, undone: carried, nextId: n })
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('classic.SessionStart', { source: 'clear' }, async ($, e, next) => {
+    const saved = (await $.store.get('carry')) as { at?: number; undone?: UndoneItem[]; nextId?: number } | undefined
+    if (saved && Array.isArray(saved.undone) && (await $.clock.now()) - (saved.at ?? 0) < 120_000) {
+      await update($, undone, () => saved.undone ?? [])
+      await update($, nextId, () => saved.nextId ?? 1)
+      await $.store.delete('carry')
+      $.ui.toast(`Carried ${saved.undone.length} left-undone item(s) into the fresh session (/desk)`)
+    }
+    await statusLine($, forcedTtl, limits)
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   // Context and cost move: keep the snapshot current.
   on('session.measure', async ($, e, next) => {
@@ -175,7 +274,8 @@ export const register: Register = (on, options) => {
       percent: e.context.percent,
       usd: e.cost?.usd ?? prev.usd,
     }))
-    await statusLine($, forcedTtl)
+    await checkContext($, limits)
+    await statusLine($, forcedTtl, limits)
     return next(e)
   })
 
@@ -222,7 +322,8 @@ export const register: Register = (on, options) => {
     } catch {
       // keep the previous snapshot
     }
-    await statusLine($, forcedTtl)
+    await checkContext($, limits)
+    await statusLine($, forcedTtl, limits)
     return result
   })
 
@@ -230,6 +331,13 @@ export const register: Register = (on, options) => {
 
   on('tool.call', async ($, e, next) => {
     const tool = String(e.tool)
+    if (tool === 'TaskCreate' || tool === 'TaskUpdate' || tool === 'TodoWrite') {
+      const ran = await next(e)
+      if (ran.deny !== undefined || ran.isError === true || e.agentId !== undefined) return ran
+      await trackTasks($, tool, e as unknown as Record<string, unknown>, ran.result)
+      await statusLine($, forcedTtl, limits)
+      return ran
+    }
     if (tool !== 'Write' && tool !== 'Edit' && tool !== 'MultiEdit' && tool !== 'NotebookEdit') {
       return next(e)
     }
@@ -269,7 +377,7 @@ export const register: Register = (on, options) => {
         $,
         markers.map(text => ({ kind: 'file' as const, text, file: short })),
       )
-      if (added > 0) await statusLine($, forcedTtl)
+      if (added > 0) await statusLine($, forcedTtl, limits)
     }
     return ran
   }).catch(($, e, next) => next(e)) // an observer: if it fails, the edit goes on as usual
@@ -294,11 +402,48 @@ export const register: Register = (on, options) => {
 
   // ---------- drawing ----------
 
+  let isHelpOpen = false
+
+  // The band above the prompt: shown while the context is getting full, even with the pane closed.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const [u, hidden, list, ts] = await Promise.all([read($, usage), read($, isBandHidden), read($, undone), read($, tasks)])
+    const level = contextLevel(u.percent, limits.warnAt, limits.urgentAt)
+    if (level === 0 || hidden || e.props.hasSurvey) return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const color = level === 2 ? 'error' : 'warning'
+    const open = list.length + ts.filter(t => t.status !== 'completed').length
+    return (
+      <Box flexDirection="column">
+        <Text wrap="wrap">
+          <Text color={color} bold>
+            {level === 2 ? '🔴' : '🟡'} Context {u.percent}% full
+          </Text>
+          <Text dimColor>
+            {level === 2
+              ? ' · answers get slower, pricier and less sharp: /clear starts fresh, /compact keeps a summary'
+              : ' · /clear when this task is done (or /compact to keep a summary)'}
+            {open > 0 ? ` · ${open} left undone will carry over` : ''}
+          </Text>
+        </Text>
+        <Box flexDirection="row" columnGap={2}>
+          <Button key="fill-clear" label="Type /clear" hotkey="c" plain onPress={() => $.prompt.fill({ text: '/clear', mode: 'replace' })} />
+          <Button key="fill-compact" label="Type /compact" hotkey="k" plain onPress={() => $.prompt.fill({ text: '/compact', mode: 'replace' })} />
+          <Button key="hide-warn" label="Hide" hotkey="h" plain dimColor onPress={() => update($, isBandHidden, () => true)} />
+        </Box>
+      </Box>
+    )
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
-    const [list, u, c] = await Promise.all([read($, undone), read($, usage), read($, cache)])
+    const [list, ts, u, c] = await Promise.all([read($, undone), read($, tasks), read($, usage), read($, cache)])
     const now = await $.clock.now()
     const width = Math.max(20, Math.min(e.props.bodyColumns ?? 40, 80))
+    const openTasks = ts.filter(t => t.status !== 'completed')
+    const openCount = list.length + openTasks.length
+    const level = contextLevel(u.percent, limits.warnAt, limits.urgentAt)
+
+    const kindLabel = (k: UndoneItem['kind']) => (k === 'said' ? 'Claude said' : k === 'file' ? 'in a file' : 'task list')
 
     // Left undone
     const undoneRows = list.slice().reverse().map((it: UndoneItem) => (
@@ -308,7 +453,7 @@ export const register: Register = (on, options) => {
             U{it.id}
           </Text>
           <Text dimColor>· {hhmm(it.at)} ·</Text>
-          <Text color="error">{it.kind === 'said' ? 'Claude said' : 'in a file'}</Text>
+          <Text color="error">{kindLabel(it.kind)}</Text>
           <Button
             key={`done-${it.id}`}
             label="✓"
@@ -322,16 +467,39 @@ export const register: Register = (on, options) => {
       </Box>
     ))
 
+    const taskRows = openTasks.map((t: TaskItem) => (
+      <Box flexDirection="row" columnGap={1} key={`t-${t.id}`}>
+        <Text color={t.status === 'in_progress' ? 'warning' : undefined}>{t.status === 'in_progress' ? '◐' : '◻'}</Text>
+        <Text wrap="wrap">{t.subject}</Text>
+      </Box>
+    ))
+
     const askClaude = async () => {
-      const items = await read($, undone)
-      if (items.length === 0) return
-      const lines = items.map(it => `- ${it.kind === 'file' && it.file ? `${it.file}: ` : ''}${it.text}`)
+      const [items, all] = await Promise.all([read($, undone), read($, tasks)])
+      const lines = [
+        ...items.map(it => `- ${it.kind === 'file' && it.file ? `${it.file}: ` : ''}${it.text}`),
+        ...all.filter(t => t.status !== 'completed').map(t => `- (task, ${t.status}) ${t.subject}`),
+      ]
+      if (lines.length === 0) return
       await $.prompt.fill({
         text: `Earlier you left these undone. Please finish them, or tell me why not:\n${lines.join('\n')}`,
         mode: 'replace',
       })
     }
 
+    const help = (
+      <Box flexDirection="column">
+        <Text dimColor wrap="wrap">How "Left undone" fills up, from three sources:</Text>
+        <Text wrap="wrap">1. Claude said: after each turn, Claude's text is scanned for admissions ("I didn't run…", "not yet tested", "I won't implement until…", "ยังไม่ได้…") and for bullets under OPEN / FLAGGED / Remaining / Next steps.</Text>
+        <Text wrap="wrap">2. In a file: when Claude writes or edits a file, new lines with TODO / FIXME / XXX / HACK / NotImplementedError are caught.</Text>
+        <Text wrap="wrap">3. Task list: Claude's own to-dos (TaskCreate / TodoWrite) that are not completed; ◐ in progress, ◻ pending. They drop off once done.</Text>
+        <Text dimColor wrap="wrap">✓ removes one · x clears all · f types a request for Claude to finish them (you press Enter). The list survives /clear.</Text>
+      </Box>
+    )
+    const toggleHelp = () => {
+      isHelpOpen = !isHelpOpen
+      $.ui.invalidate('ui.render')
+    }
     // Context bar
     const used = u.categories.filter(k => k.kind === 'used')
     const total = u.window || 1
@@ -403,20 +571,58 @@ export const register: Register = (on, options) => {
 
     const elapsed = u.startedAt !== undefined ? duration(now - u.startedAt) : undefined
 
+    const banner =
+      level > 0 ? (
+        <Box flexDirection="column" borderStyle="bold" borderColor={level === 2 ? 'error' : 'warning'} paddingX={1}>
+          <Text color={level === 2 ? 'error' : 'warning'} bold>
+            {level === 2 ? '🔴 Context nearly full' : '🟡 Context getting full'} ({u.percent}%)
+          </Text>
+          <Text wrap="wrap">
+            {level === 2
+              ? 'Time for /clear: long contexts make answers slower, pricier and less sharp. Use /compact to keep a summary instead.'
+              : 'Finish the current task, then /clear (or /compact to keep a summary).'}
+          </Text>
+          {openCount > 0 && <Text dimColor wrap="wrap">Left undone ({openCount}) carries over to the fresh session.</Text>}
+          <Box flexDirection="row" columnGap={2}>
+            <Button key="p-clear" label="Type /clear" hotkey="c" plain onPress={() => $.prompt.fill({ text: '/clear', mode: 'replace' })} />
+            <Button key="p-compact" label="Type /compact" hotkey="k" plain onPress={() => $.prompt.fill({ text: '/compact', mode: 'replace' })} />
+          </Box>
+        </Box>
+      ) : null
+
     return (
       <Box flexDirection="column" rowGap={1}>
+        {banner}
         <Box flexDirection="column" borderStyle="round" borderColor="error" paddingX={1}>
-          <Text color="error" bold>
-            Left undone {list.length > 0 ? `(${list.length})` : ''}
-          </Text>
-          {list.length === 0 ? (
-            <Text dimColor>Nothing left undone. Claude's admissions and new TODOs show up here.</Text>
+          <Box flexDirection="row" columnGap={2}>
+            <Text color="error" bold>
+              Left undone {openCount > 0 ? `(${openCount})` : ''}
+            </Text>
+            <Button key="help" label={isHelpOpen ? 'hide help' : 'how it works'} hotkey="h" plain dimColor onPress={toggleHelp} />
+          </Box>
+          {isHelpOpen && help}
+          {openCount === 0 ? (
+            <Text dimColor>Nothing left undone. Press h to see what gets caught.</Text>
           ) : (
             <Box flexDirection="column" rowGap={1}>
               {undoneRows}
+              {openTasks.length > 0 && (
+                <Box flexDirection="column">
+                  <Text dimColor>Task list · not completed</Text>
+                  {taskRows}
+                </Box>
+              )}
               <Box flexDirection="row" columnGap={2}>
                 <Button key="ask" label="Ask Claude to finish" hotkey="f" variant="primary" onPress={askClaude} />
-                <Button key="clear" label="Clear all" hotkey="x" onPress={() => update($, undone, () => [])} />
+                <Button
+                  key="clear"
+                  label="Clear all"
+                  hotkey="x"
+                  onPress={async () => {
+                    await update($, undone, () => [])
+                    await update($, tasks, () => [])
+                  }}
+                />
               </Box>
             </Box>
           )}

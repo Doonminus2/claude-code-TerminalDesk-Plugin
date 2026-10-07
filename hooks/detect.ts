@@ -168,3 +168,11 @@ export function hhmm(at: number): string {
   const d = new Date(at)
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
+
+/** 0 fine, 1 getting full, 2 nearly full. */
+export function contextLevel(percent: number | undefined, warnAt: number, urgentAt: number): 0 | 1 | 2 {
+  if (percent === undefined) return 0
+  if (percent >= urgentAt) return 2
+  if (percent >= warnAt) return 1
+  return 0
+}
